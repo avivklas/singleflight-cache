@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "singleflight-cache"
+version = "0.1.0"
+authors = [
+  { name="Aviv", email="aviv@example.com" },
+]
+description = "A high-performance thread-safe local cache with Single-Flight logic"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Intended Audience :: Developers",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/aviv/singleflight-cache"
+"Bug Tracker" = "https://github.com/aviv/singleflight-cache/issues"
