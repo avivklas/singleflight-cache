@@ -1,123 +1,222 @@
-import time
 import threading
-from singleflight_cache import FastCache
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event, Thread
+from typing import Any, List
+from unittest import TestCase
+from unittest.mock import Mock
 
-def test_single_flight():
-    cache = FastCache()
-    call_count = 0
-    lock = threading.Lock()
-
-    def factory(key):
-        nonlocal call_count
-        with lock:
-            call_count += 1
-        time.sleep(0.1) # Simulate expensive work
-        return f"value_for_{key}"
-
-    # Spawn 50 threads that all ask for the same key at the same time
-    threads = []
-    results = []
-
-    def worker():
-        res = cache.get("test_key", factory, "test_key")
-        results.append(res)
-
-    for _ in range(50):
-        t = threading.Thread(target=worker)
-        threads.append(t)
-        t.start()
-
-    for t in threads:
-        t.join()
-
-    # Assert that all threads got the correct value
-    assert len(results) == 50
-    assert all(r == "value_for_test_key" for r in results)
-
-    # Assert that the factory was only called EXACTLY ONCE
-    assert call_count == 1
+from singleflight_cache import FastCache, SingleFlightCache
 
 
-def test_lru_eviction():
-    cache = FastCache(max_size=3)
-    
-    # Fill cache to max
-    cache.get("k1", lambda: "v1")
-    cache.get("k2", lambda: "v2")
-    cache.get("k3", lambda: "v3")
-    
-    assert len(cache) == 3
-    
-    # Access k1 to make it most recently used
-    # Wait a tiny bit so time.monotonic() advances
-    time.sleep(0.01)
-    cache.get("k1", lambda: "v1")
-    time.sleep(0.01)
-    
-    # Add k4, which should evict k2 because k1 was just accessed, and k2 is oldest
-    cache.get("k4", lambda: "v4")
-    
-    assert len(cache) == 3
-    assert cache._cache.get("k1") is not None
-    assert cache._cache.get("k2") is None # Evicted
-    assert cache._cache.get("k3") is not None
-    assert cache._cache.get("k4") is not None
+class TestSingleFlightCache(TestCase):
+    def setUp(self) -> None:
+        self.cache: SingleFlightCache = SingleFlightCache(max_size=3, ttl=None)
 
+    def test_backwards_compatibility_fast_cache_alias(self):
+        self.assertIs(FastCache, SingleFlightCache)
+        fc = FastCache(max_size=5, ttl=10)
+        self.assertEqual(fc.max_size, 5)
+        self.assertEqual(fc.ttl, 10)
 
-def test_ttl_expiration():
-    cache = FastCache(ttl=0.1)
-    
-    cache.get("k1", lambda: "v1")
-    assert cache._cache.get("k1") is not None
-    
-    # Read before TTL
-    val = cache.get("k1", lambda: "v_new")
-    assert val == "v1"
-    
-    # Wait for TTL to expire
-    time.sleep(0.15)
-    
-    # Now it should fetch again
-    val = cache.get("k1", lambda: "v_new")
-    assert val == "v_new"
+    def test_ttl_and_max_size_properties(self):
+        cache = SingleFlightCache(max_size=7, ttl=42)
+        self.assertEqual(cache.max_size, 7)
+        self.assertEqual(cache.ttl, 42)
 
+    def test_get_returns_default_when_key_missing(self):
+        self.assertIsNone(self.cache.get("missing"))
+        self.assertEqual(self.cache.get("missing", "fallback"), "fallback")
 
-def test_exception_propagation():
-    cache = FastCache()
-    
-    class MyError(Exception):
-        pass
+    def test_set_then_get_returns_stored_value(self):
+        self.cache.set("key", "value")
+        self.assertEqual(self.cache.get("key"), "value")
 
-    def faulty_factory():
-        time.sleep(0.1)
-        raise MyError("Failed")
-        
-    threads = []
-    results = []
-    exceptions = []
+    def test_get_returns_default_when_entry_expired(self):
+        cache = SingleFlightCache(ttl=10)
+        cache.set("key", "value")
+        entry = cache._cache["key"]
+        entry.expiry = time.monotonic() - 1
 
-    def worker():
-        try:
-            res = cache.get("bad_key", faulty_factory)
+        self.assertIsNone(cache.get("key"))
+
+    def test_len_reflects_number_of_stored_items(self):
+        self.assertEqual(len(self.cache), 0)
+        self.cache.set("a", 1)
+        self.cache.set("b", 2)
+        self.assertEqual(len(self.cache), 2)
+
+    def test_remove_and_invalidate(self):
+        self.cache.set("key1", "val1")
+        self.cache.set("key2", "val2")
+        self.cache.remove("key1")
+        self.cache.invalidate("key2")
+        self.assertIsNone(self.cache.get("key1"))
+        self.assertIsNone(self.cache.get("key2"))
+        self.assertEqual(len(self.cache), 0)
+
+    def test_clear_removes_all_items(self):
+        self.cache.set("a", 1)
+        self.cache.set("b", 2)
+        self.cache.clear()
+        self.assertEqual(len(self.cache), 0)
+
+    def test_single_flight_execution(self):
+        call_count = 0
+        lock = threading.Lock()
+
+        def factory(key):
+            nonlocal call_count
+            with lock:
+                call_count += 1
+            time.sleep(0.1)
+            return f"value_for_{key}"
+
+        results = []
+        threads = []
+
+        def worker():
+            res = self.cache.get("test_key", factory, "test_key")
             results.append(res)
-        except Exception as e:
-            exceptions.append(e)
 
-    for _ in range(10):
-        t = threading.Thread(target=worker)
-        threads.append(t)
-        t.start()
+        for _ in range(20):
+            t = threading.Thread(target=worker)
+            threads.append(t)
+            t.start()
 
-    for t in threads:
-        t.join()
+        for t in threads:
+            t.join()
 
-    # Nobody should get a result
-    assert len(results) == 0
-    # Everyone should get an exception
-    assert len(exceptions) == 10
-    assert all(isinstance(e, MyError) for e in exceptions)
-    
-    # Inflight state should be cleared, so next call should retry
-    # We provide a good factory this time
-    good_val = cache.get("bad_key", lambda: "success")
-    assert good_val == "success"
+        self.assertEqual(len(results), 20)
+        self.assertTrue(all(r == "value_for_test_key" for r in results))
+        self.assertEqual(call_count, 1)
+
+    def test_set_evicts_least_recently_used_item(self):
+        cache = SingleFlightCache(max_size=2)
+        cache.set("a", "va")
+        cache.set("b", "vb")
+
+        # Access 'a' to make it most recently used
+        cache.get("a")
+
+        # Add 'c', which should evict 'b'
+        cache.set("c", "vc")
+
+        self.assertIsNone(cache.get("b"))
+        self.assertEqual(cache.get("a"), "va")
+        self.assertEqual(cache.get("c"), "vc")
+        self.assertEqual(len(cache), 2)
+
+    def test_eviction_prefers_expired_items(self):
+        cache = SingleFlightCache(max_size=2)
+        cache.set("a", "va")
+        cache.set("b", "vb")
+
+        entry_a = cache._cache["a"]
+        entry_a.expiry = time.monotonic() - 10
+        cache.get("b")
+
+        cache.set("c", "vc")
+
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"), "vb")
+        self.assertEqual(cache.get("c"), "vc")
+
+    def test_get_or_set_if_doesnt_exist_caches_result(self):
+        generator = Mock(return_value="generated-value")
+        result = self.cache.get_or_set_if_doesnt_exist("key", generator)
+        self.assertEqual(result, "generated-value")
+        generator.assert_called_once()
+        self.assertEqual(self.cache.get("key"), "generated-value")
+
+    def test_exception_propagation(self):
+        class MyError(Exception):
+            pass
+
+        def faulty_factory():
+            time.sleep(0.05)
+            raise MyError("Failed")
+
+        threads = []
+        exceptions = []
+
+        def worker():
+            try:
+                self.cache.get("bad_key", faulty_factory)
+            except Exception as e:
+                exceptions.append(e)
+
+        for _ in range(10):
+            t = threading.Thread(target=worker)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(exceptions), 10)
+        self.assertTrue(all(isinstance(e, MyError) for e in exceptions))
+        self.assertEqual(len(self.cache), 0)
+
+        good_val = self.cache.get("bad_key", lambda: "success")
+        self.assertEqual(good_val, "success")
+
+    def test_reentrant_call_raises_recursion_error(self):
+        def reentrant_generator():
+            return self.cache.get("key", lambda: "inner")
+
+        with self.assertRaises(RecursionError):
+            self.cache.get("key", reentrant_generator)
+
+    def test_remove_during_inflight_computation_prevents_stale_value(self):
+        computation_started = Event()
+        release_computation = Event()
+
+        def generator():
+            computation_started.set()
+            release_computation.wait(timeout=5)
+            return "stale-value"
+
+        results = []
+        computing_thread = Thread(
+            target=lambda: results.append(self.cache.get("key", generator))
+        )
+        computing_thread.start()
+        self.assertTrue(computation_started.wait(timeout=5))
+
+        self.cache.remove("key")
+        release_computation.set()
+        computing_thread.join(timeout=5)
+
+        self.assertEqual(results, ["stale-value"])
+        self.assertIsNone(self.cache.get("key"))
+        self.assertEqual(len(self.cache), 0)
+
+    def test_set_during_inflight_prevents_stale_overwrite(self):
+        computation_started = Event()
+        release_computation = Event()
+
+        def slow_generator():
+            computation_started.set()
+            release_computation.wait(timeout=5)
+            return "stale-generated-value"
+
+        computing_thread = Thread(
+            target=lambda: self.cache.get("key", slow_generator)
+        )
+        computing_thread.start()
+        self.assertTrue(computation_started.wait(timeout=5))
+
+        self.cache.set("key", "fresh-explicit-value")
+        release_computation.set()
+        computing_thread.join(timeout=5)
+
+        self.assertEqual(self.cache.get("key"), "fresh-explicit-value")
+
+    def test_does_not_cache_none_result(self):
+        generator = Mock(return_value=None)
+        result = self.cache.get("key", generator)
+
+        self.assertIsNone(result)
+        self.assertEqual(len(self.cache), 0)
+        self.assertIsNone(self.cache.get("key"))

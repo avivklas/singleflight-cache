@@ -1,14 +1,16 @@
 # singleflight-cache
 
-A high-performance thread-safe local cache for Python, featuring **Single-Flight** resolution.
+A high-performance, thread-safe local cache for Python featuring **Single-Flight** execution, **Inflight Disowning**, and **O(1) LRU Eviction**.
 
 ## The Problem it Solves
 If multiple threads simultaneously experience a cache miss for the same key, traditional caches will queue them up behind a lock, or allow all of them to execute the expensive fetch operation concurrently ("thundering herd"). 
 
 `singleflight-cache` solves this gracefully:
-- **Single-Flight:** Only the first thread executes the data fetch. Other concurrent threads requesting the same key wait passively for the first thread's result without duplicating work.
-- **Lock-Free Reads:** Cache hits operate without any read locks, making highly concurrent access incredibly fast.
-- **Built-in Eviction:** Supports TTL (Time-To-Live) and max-size LRU eviction.
+- **Single-Flight Execution:** Only the first thread executes the data fetch. Other concurrent threads requesting the same key wait passively for the first thread's result without duplicating work.
+- **Inflight Disowning & Invalidation Protection:** Explicit `set()`, `remove()`, `invalidate()`, or `clear()` calls disown ongoing in-flight computations so stale values never overwrite newly cached data.
+- **Reentrancy Guard:** Detects recursive calls on the same thread for the same key to prevent deadlocks with clear `RecursionError` diagnostics.
+- **O(1) LRU & Bounded Eviction:** Uses `OrderedDict` for true O(1) LRU order updates and bounded eviction scanning.
+- **TTL Expiration:** Optional Time-To-Live expiration per key.
 
 ## Installation
 
@@ -19,11 +21,10 @@ pip install singleflight-cache
 ## Usage
 
 ```python
-from singleflight_cache import FastCache
-import requests
+from singleflight_cache import SingleFlightCache  # FastCache is also available as an alias
 
 # Create a cache with up to 1000 items and a 60-second TTL
-cache = FastCache(max_size=1000, ttl=60)
+cache = SingleFlightCache(max_size=1000, ttl=60)
 
 def fetch_user_data(user_id):
     # This expensive operation will only run ONCE even if 100 threads 
@@ -31,9 +32,26 @@ def fetch_user_data(user_id):
     response = requests.get(f"https://api.example.com/users/{user_id}")
     return response.json()
 
-# In your worker threads:
+# Single-Flight execution:
 data = cache.get("user_123", fetch_user_data, "user_123")
+
+# Direct cache read (without factory):
+value = cache.get("user_123", default=None)
+
+# Direct write (disowns any running in-flight computation):
+cache.set("user_123", {"name": "Alice"})
+
+# Explicit invalidation:
+cache.remove("user_123")  # or cache.invalidate("user_123")
 ```
+
+## Features
+
+### In-Flight Disowning
+If key `k` is removed or overwritten (`cache.set("k", new_val)`) while a slow generator is still computing in the background, `singleflight-cache` disowns the running computation. When the slow thread finishes, it detects it no longer owns the slot and discards the stale result instead of corrupting the cache.
+
+### Reentrancy Protection
+Attempting to recursively request the same key from within its own generator function raises a `RecursionError` instead of causing a silent thread deadlock.
 
 ## Benchmarks
 
