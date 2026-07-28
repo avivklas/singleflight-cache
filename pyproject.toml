@@ -20,5 +20,5 @@ classifiers = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/aviv/singleflight-cache"
-"Bug Tracker" = "https://github.com/aviv/singleflight-cache/issues"
+"Homepage" = "https://github.com/avivklas/singleflight-cache"
+"Bug Tracker" = "https://github.com/avivklas/singleflight-cache/issues"
