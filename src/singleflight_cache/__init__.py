@@ -154,15 +154,18 @@ class SingleFlightCache:
     # Alias for get_or_set_if_doesnt_exist
     get_or_set = get_or_set_if_doesnt_exist
 
-    def remove(self, key: str) -> None:
-        """Remove a key from the cache, disowning any in-flight computation."""
-        with self._lock:
-            self._cache.pop(key, None)
-            self._inflight.pop(key, None)
+    def remove(self, key: str) -> bool:
+        """Remove a key from the cache, disowning any in-flight computation.
 
-    def invalidate(self, key: str) -> None:
-        """Alias for remove()."""
-        self.remove(key)
+        :return: True if a cached entry was removed, False if the key was not cached.
+        """
+        with self._lock:
+            self._inflight.pop(key, None)
+            return self._cache.pop(key, None) is not None
+
+    def invalidate(self, key: str) -> bool:
+        """Force the next get() for this key to fetch fresh data. Alias for remove()."""
+        return self.remove(key)
 
     def clear(self) -> None:
         """Clear all items, disowning all in-flight computations."""

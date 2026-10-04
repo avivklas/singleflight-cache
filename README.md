@@ -41,8 +41,9 @@ value = cache.get("user_123", default=None)
 # Direct write (disowns any running in-flight computation):
 cache.set("user_123", {"name": "Alice"})
 
-# Explicit invalidation:
-cache.remove("user_123")  # or cache.invalidate("user_123")
+# Explicit invalidation (e.g. after a write). Returns True if an entry was cached:
+cache.invalidate("user_123")  # or cache.remove("user_123")
+# The next get() fetches fresh data, even if a fetch was in flight during invalidation.
 ```
 
 ## Features

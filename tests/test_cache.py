@@ -55,6 +55,28 @@ class TestSingleFlightCache(TestCase):
         self.assertIsNone(self.cache.get("key2"))
         self.assertEqual(len(self.cache), 0)
 
+    def test_invalidate_returns_whether_a_cached_entry_was_removed(self):
+        self.cache.set("key", "value")
+
+        self.assertTrue(self.cache.invalidate("key"))
+        self.assertFalse(self.cache.invalidate("key"))
+        self.assertFalse(self.cache.invalidate("never-cached"))
+
+    def test_invalidate_forces_refetch_on_next_get(self):
+        self.cache.get("key", lambda: "old")
+        self.cache.invalidate("key")
+
+        self.assertEqual(self.cache.get("key", lambda: "new"), "new")
+
+    def test_invalidate_only_affects_given_key(self):
+        self.cache.set("a", 1)
+        self.cache.set("b", 2)
+
+        self.cache.invalidate("a")
+
+        self.assertIsNone(self.cache.get("a"))
+        self.assertEqual(self.cache.get("b"), 2)
+
     def test_clear_removes_all_items(self):
         self.cache.set("a", 1)
         self.cache.set("b", 2)
